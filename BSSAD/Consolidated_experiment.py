@@ -16,15 +16,15 @@ import argparse
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 '''
-    Dataset : WADI, SWAT, PUMP, HTTP, SMD
+    Dataset : WADI, SWAT, PUMP, HTTP, ASD
 '''
-dataset = "SWAT"
+dataset = "PUMP"
 
 
 '''
-    filterType : PF, EnKF
+    filterType : PF, EnKF, UKF-PF
 '''
-filterType = "PF"
+filterType = "EnKF"
 
 '''
     resample_method : systematic
@@ -35,7 +35,7 @@ resample_method = "systematic"
     n_particles (PF) : 500, 1000, 2000
     n_particles (EnKF) : 10, 20, 50
 '''
-n_particles = 500
+n_particles = 20
 
 
 '''
@@ -61,8 +61,8 @@ if dataset == "HTTP":
     seqL = 12
     kf = BSSAD(signals, tau=seqL, input_range=seqL*3)
 
-if dataset == "SMD":
-    train_df, val_df, test_df, signals = load_SMD_data()
+if dataset == "ASD":
+    train_df, val_df, test_df, signals = load_ASD_data()
     seqL = 12
     kf = BSSAD(signals, tau=seqL, input_range=seqL*3)
 
@@ -105,7 +105,7 @@ if retrain_model:
     hp_list.append(UniformIntegerHyperparameter('uencoding_layers',1,3))
     hp_list.append(UniformIntegerHyperparameter('uencoding_dim',32,256))
     hp_list.append(UniformFloatHyperparameter('l2',0,0.05))
-    hp_list.append(ConstHyperparameter('epochs',50))
+    hp_list.append(ConstHyperparameter('epochs',100))
     hp_list.append(ConstHyperparameter('save_best_only',True))
     hp_list.append(ConstHyperparameter('validation_split',0.1))
     hp_list.append(ConstHyperparameter('batch_size',256*16))
@@ -125,8 +125,8 @@ if retrain_model:
     if dataset == "HTTP":
         kf = kf.save_model('./results/HTTP')
         
-    if dataset == "SMD":
-        kf = kf.save_model('./results/SMD1')
+    if dataset == "ASD":
+        kf = kf.save_model('./results/ASD1')
     
     print('optHPCfg',optHPCfg)
     print('bestScore',bestScore)
@@ -150,8 +150,8 @@ else:
         kf = kf.load_model('./results/HTTP')
         print("Loaded model...")
         
-    if dataset == "SMD":
-        kf = kf.load_model('./results/SMD1')
+    if dataset == "ASD":
+        kf = kf.load_model('./results/ASD1')
 
 
 val_df = normalize_and_encode_signals(val_df,signals,scaler='min_max') 
@@ -172,16 +172,20 @@ kf.estimate_noise(val_x,val_u,val_y)
 f1 = []
 auc = []
 mcc = []
-seedList = []
-iterations = 50
+bestSeed = 2022
+bestF1 = 0.0
+iterations = 1
 
 for k in range(0, iterations):
-    newSeed = 2022 + k
+    newSeed = bestSeed + k
     random.seed(newSeed)
-    seedList.append(newSeed)
-    fileName = dataset + "_results " + "n = " + str(n_particles) + "seed=" + str(newSeed) + "Filtertype=" + filterType + ".txt"
+    np.random.seed(newSeed)
+    tf.random.set_seed(newSeed)
+    fileName = dataset + "_results_Final" + "n = " + str(n_particles) + "seed=" + str(newSeed) + "Filtertype=" + filterType + ".txt"
     writePath = "./results/experiment_results"
     completeName = os.path.join(writePath, fileName)
+    if not os.path.exists(writePath):
+        os.mkdir(writePath)
     file = open(completeName, "w")
     
     '''
@@ -200,8 +204,9 @@ for k in range(0, iterations):
     print("Filter type: " + filterType)
     print("Resample_method: " + resample_method)
     print("Number of Particles: "+ str(n_particles))
+    print("Seed: ", newSeed)
     
-    z_scores_ekf = kf.score_samples(test_x, test_u, n_particles, filterType, resample_method, reset_hidden_states=True)
+    z_scores_ekf = kf.score_samples(test_x, test_u, newSeed, n_particles, filterType, resample_method, reset_hidden_states=True)
     
     z_scores_ekf = np.nan_to_num(z_scores_ekf)
     t, th = bf_search(z_scores_ekf, labels[1:],start=0,end=np.percentile(z_scores_ekf,99.9),step_num=10000,display_freq=50,verbose=False)
@@ -218,11 +223,83 @@ for k in range(0, iterations):
     print("MCC", t[8])
     print()
     
+    if t[0] > bestF1:
+        bestF1 = t[0]
+        bestSeed = newSeed
     f1.append(t[0])
     auc.append(t[7])
     mcc.append(t[8])
     
     file.write("BSSAD_" + filterType + "\n" + "Best-F1: " + str(t[0]) + "\n"
+               + "Precision: " + str(t[1]) + "\n" + "Recall: " + str(t[2]) + "\n"
+               + "Accuracy: " + str((t[3]+t[4])/(t[3]+t[4]+t[5]+t[6])) + "\n"
+               + "TP: " + str(t[3]) + "\n" + "TN: " + str(t[4]) + "\n"
+               + "FP: " + str(t[5]) + "\n" + "FN: " + str(t[6]) + "\n"
+               + "AUC: " + str(t[7]) + "\n" + "MCC: " + str(t[8]) + "\n")
+    
+    print()
+    
+# =============================================================================
+#     z_scores_ukf = kf.score_samples(test_x, test_u, n_particles, "UKF", resample_method, reset_hidden_states=True)
+#     
+#     z_scores_ukf = np.nan_to_num(z_scores_ukf)
+#     t, th = bf_search(z_scores_ukf, labels[1:],start=0,end=np.percentile(z_scores_ukf,99.9),step_num=10000,display_freq=50,verbose=False)
+#     print('NSIBF')
+#     print('best-f1', t[0])
+#     print('precision', t[1])
+#     print('recall', t[2])
+#     print('accuracy',(t[3]+t[4])/(t[3]+t[4]+t[5]+t[6]))
+#     print('TP', t[3])
+#     print('TN', t[4])
+#     print('FP', t[5])
+#     print('FN', t[6])
+#     print("AUC", t[7])
+#     print("MCC", t[8])
+#     print()
+#     
+#     file.write("NSIBF" + "\n" + "Best-F1: " + str(t[0]) + "\n"
+#                + "Precision: " + str(t[1]) + "\n" + "Recall: " + str(t[2]) + "\n"
+#                + "Accuracy: " + str((t[3]+t[4])/(t[3]+t[4]+t[5]+t[6])) + "\n"
+#                + "TP: " + str(t[3]) + "\n" + "TN: " + str(t[4]) + "\n"
+#                + "FP: " + str(t[5]) + "\n" + "FN: " + str(t[6]) + "\n"
+#                + "AUC: " + str(t[7]) + "\n" + "MCC: " + str(t[8]) + "\n")
+# =============================================================================
+
+    recon_scores,pred_scores = kf.score_samples_via_residual_error(test_x,test_u)
+
+    t, th = bf_search(recon_scores[1:], labels[1:],start=0,end=np.percentile(recon_scores,99.9),step_num=10000,display_freq=50,verbose=False)
+    print('NSIBF-RECON')
+    print('best-f1', t[0])
+    print('precision', t[1])
+    print('recall', t[2])
+    print('accuracy',(t[3]+t[4])/(t[3]+t[4]+t[5]+t[6]))
+    print('TP', t[3])
+    print('TN', t[4])
+    print('FP', t[5])
+    print('FN', t[6])
+    print("AUC", t[7])
+    print("MCC", t[8])
+    print()
+    file.write("NSIBF_RECON" + "\n" + "Best-F1: " + str(t[0]) + "\n"
+               + "Precision: " + str(t[1]) + "\n" + "Recall: " + str(t[2]) + "\n"
+               + "Accuracy: " + str((t[3]+t[4])/(t[3]+t[4]+t[5]+t[6])) + "\n"
+               + "TP: " + str(t[3]) + "\n" + "TN: " + str(t[4]) + "\n"
+               + "FP: " + str(t[5]) + "\n" + "FN: " + str(t[6]) + "\n"
+               + "AUC: " + str(t[7]) + "\n" + "MCC: " + str(t[8]) + "\n")
+    
+    t, th = bf_search(pred_scores, labels[1:],start=0,end=np.percentile(pred_scores,99.9),step_num=10000,display_freq=50,verbose=False)
+    print('NSIBF-PRED')
+    print('best-f1', t[0])
+    print('precision', t[1])
+    print('recall', t[2])
+    print('accuracy',(t[3]+t[4])/(t[3]+t[4]+t[5]+t[6]))
+    print('TP', t[3])
+    print('TN', t[4])
+    print('FP', t[5])
+    print('FN', t[6])
+    print("AUC", t[7])
+    print("MCC", t[8])
+    file.write("NSIBF_PRED" + "\n" + "Best-F1: " + str(t[0]) + "\n"
                + "Precision: " + str(t[1]) + "\n" + "Recall: " + str(t[2]) + "\n"
                + "Accuracy: " + str((t[3]+t[4])/(t[3]+t[4]+t[5]+t[6])) + "\n"
                + "TP: " + str(t[3]) + "\n" + "TN: " + str(t[4]) + "\n"
@@ -238,12 +315,26 @@ npyAuc = np.array(auc)
 npyMcc = np.array(mcc)
 
 bestF1 = np.max(npyf1)
+#bestSeed = np.argmax(npyf1)
+#bestSeed = bestSeed + 2022
 bestAuc = np.max(auc)
 bestMcc = np.max(mcc)
+
 
 print("Best F1: ", bestF1)
 print("Best AUC: ", bestAuc)
 print("Best MCC: ", bestMcc)
+print("Best Score Seed: ", bestSeed)
+
+fileName = str(dataset) + "_n=" + str(n_particles) + "_bestSeed.txt"
+writePath = "./results/experiment_results"
+completeName = os.path.join(writePath, fileName)
+file = open(completeName, "w")
+file.write("BestF1: " + str(bestF1) + "\n" +
+           "Best AUC: " + str(bestAuc) + "\n" +
+           "Best MCC: " + str(bestMcc) + "\n" +
+           "Best Seed: " + str(bestSeed) + "\n")
+file.close()
 
 f1file = dataset + "_" + str(n_particles) + "_bestF1.csv"
 aucfile = dataset + "_" + str(n_particles) + "_bestAUC.csv"

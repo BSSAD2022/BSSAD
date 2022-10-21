@@ -1,6 +1,9 @@
 import numpy as np
+import random
 from ...preprocessing import ContinousSignal,DiscreteSignal
+from filterpy.kalman import unscented_transform, JulierSigmaPoints
 from numpy.random import multivariate_normal
+import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 import tempfile
@@ -38,9 +41,11 @@ class BSSAD(BaseModel,DataExtractor):
         
         'mean vector of hidden states'
         self.z_ekf = None
+        self.z_ukf = None
         self.z_pf = None
         'covariance matrix of hidden states'
         self.P_ekf = None
+        self.P_ukf = None
         self.P_pf = None
         'process noise covariance matrix'
         self.Q = None 
@@ -54,6 +59,10 @@ class BSSAD(BaseModel,DataExtractor):
         self.h_inv_nn = None
         'Sigma points/Particles'
         self.sigmas = None
+        
+        self.transformed_particles_noisy = None
+        
+        self.x_particles_ukf = None
         
         self.loss_weights = [0.45,0.45,0.1]
     
@@ -139,7 +148,7 @@ class BSSAD(BaseModel,DataExtractor):
             return x, u, None, z
     
     
-    def score_samples(self, x, u, n_particles = 20, filterType = "PF", resample_method="systematic", reset_hidden_states=True):
+    def score_samples(self, x, u, seed, n_particles = 20, filterType = "PF", resample_method="systematic",  reset_hidden_states=True):
         '''
         Calculate anomalies scores via Bayesian State Space Algorithm - Ensemble Kalman Filter (EnKF) and Particle Filter (PF)
         Parameters
@@ -156,7 +165,10 @@ class BSSAD(BaseModel,DataExtractor):
         Returns
         -------
         anomaly_scores : the anomaly scores from the second timestep, matrix of shape = [n_timesteps-1, ]
-        '''   
+        '''
+        random.seed(seed)
+        np.random.seed(seed)
+        tf.random.set_seed(seed)
         if self.Q is None or self.R is None:
             print('please estimate noise before running this method!')
             return None
@@ -164,6 +176,8 @@ class BSSAD(BaseModel,DataExtractor):
         if reset_hidden_states:
             self.z_ekf = self._encoding(x[0,:])
             self.P_ekf = np.diag([100.00001]*len(self.z_ekf))
+            self.z_ukf = self._encoding(x[0,:])
+            self.P_ukf = np.diag([0.00001]*len(self.z_ukf))
             self.z_pf = self._encoding(x[0,:])
             self.P_pf = np.diag([0.00001]*len(self.z_pf))
             
@@ -182,11 +196,18 @@ class BSSAD(BaseModel,DataExtractor):
             x_t = x[t,:]
             
             if filterType == "PF":
+                zmu, Pcov, particles_temp = self._UKFPF(x_t, u_t, n_particles, particles, resample_method)
+                particles = particles_temp
+                
+            if filterType == "UKF-PF":
                 zmu, Pcov, particles_temp = self._PF(x_t, u_t, n_particles, particles, resample_method)
                 particles = particles_temp
                 
             if filterType == "EnKF":
                 zmu, Pcov = self._EnKF(x_t, u_t, sp, n_particles)
+                
+            if filterType == "UKF":
+                zmu, Pcov = self._UKF(x_t, u_t)
             
                    
             inv_Pcov = np.linalg.pinv(Pcov)
@@ -461,6 +482,42 @@ class BSSAD(BaseModel,DataExtractor):
 
         return z_mean, P_zz_ekf
     
+    def _UKF(self, x_t, u_t):
+        '''
+        Unscented Kalman Filter (UKF) 
+        Parameters
+        ----------
+        x : the target variables, matrix of shape = [n_targets, ]
+        u : the sensors, matrix of shape = [input_range, n_features]
+        
+        Returns
+        -------
+        x_hat : next state mean, matrix of shape = [n_targets, ]
+        Px_hat : next state covariance matrix, matrix of shape = [n_targets, n_targets] 
+        ''' 
+        
+        'Prediction step UKF'
+        points = JulierSigmaPoints(n=len(self.z_ukf),kappa=3-len(self.z_ukf),sqrt_method=self._sqrt_func)
+        sigmas = points.sigma_points(self.z_ukf, self.P_ukf)
+        sigmas_f = self._state_transition_func(sigmas,u_t)
+        z_hat, P_hat = unscented_transform(sigmas_f,points.Wm,points.Wc,self.Q)
+        
+        'Update step UKF'
+        sigmas_h = self._measurement_func(sigmas_f)
+        x_hat, Px_hat = unscented_transform(sigmas_h,points.Wm,points.Wc,self.R)       
+        Pxz = np.zeros((len(z_hat),len(x_hat)))
+        for i in range(len(sigmas)):
+            Pxz += points.Wc[i] * np.outer(sigmas_f[i]-z_hat,sigmas_h[i]-x_hat)
+        
+        try:
+            K = np.dot(Pxz,np.linalg.inv(Px_hat))
+        except:
+            K = np.dot(Pxz,np.linalg.pinv(Px_hat))
+        self.z_ukf = z_hat + np.dot(K,x_t-x_hat)
+        self.P_ukf = P_hat - np.dot(K,Px_hat).dot(np.transpose(K))
+        
+        return x_hat, Px_hat
+    
     def _PF(self, x_t, u_t, n_particles, particles, resample_method="systematic"):
         '''
         Particle Filter (PF) 
@@ -530,7 +587,107 @@ class BSSAD(BaseModel,DataExtractor):
                 np.random.random(size=(n_particles,)) < resample_proportion)
             particles[random_mask, :] = multivariate_normal(mean=self.z_pf, cov=self.P_pf, size=n_particles)[random_mask, :]
             
-        return mean_hypothesis, cov_hypothesis, particles    
+        return mean_hypothesis, cov_hypothesis, particles 
+    
+    def _UKFPF(self, x_t, u_t, n_particles, particles, resample_method="systematic"):
+        '''
+        Particle Filter (PF) 
+        Parameters
+        ----------
+        x : the target variables, matrix of shape = [n_targets, ]
+        u : the sensors, matrix of shape = [input_range, n_features]
+        particles: particles, matrix of shape = [n_particles, z_dim]
+        n_particles : number of sigma_points/particles to sample from prior distribution
+        
+        Returns
+        -------
+        mean_hypothesis : next state mean, matrix of shape = [n_targets, ]
+        cov_hypothesis : next state covariance matrix, matrix of shape = [n_targets, n_targets] 
+        particles : updated particles, matrix of shape = [n_particles, z_dim] 
+        ''' 
+        
+        'Prediction step'
+        if self.Q.shape==():
+            self.Q = np.diag([self.Q]*len(self.z_pf))
+        self.weights = np.ones(n_particles) / n_particles
+        
+        resample_proportion = 0.01
+        n_eff_threshold = 1
+        
+        particles_ukf = particles.T
+        z_pf, P_pf = np.mean(particles,0), np.cov(particles.T)
+        
+        points = JulierSigmaPoints(n=len(particles_ukf),kappa=3-len(particles_ukf),sqrt_method=self._sqrt_func)
+        sigmas = points.sigma_points(z_pf, P_pf)
+        sigmas_f = self._state_transition_func(sigmas,u_t)
+        z_hat, P_hat = unscented_transform(sigmas_f,points.Wm,points.Wc,self.Q)
+        
+        'Update step UKF'
+        sigmas_h = self._measurement_func(sigmas_f)
+        x_hat, Px_hat = unscented_transform(sigmas_h,points.Wm,points.Wc,self.R)       
+        Pxz = np.zeros((len(z_hat),len(x_hat)))
+        for i in range(len(sigmas)):
+            Pxz += points.Wc[i] * np.outer(sigmas_f[i]-z_hat,sigmas_h[i]-x_hat)
+        
+        try:
+            K = np.dot(Pxz,np.linalg.inv(Px_hat))
+        except:
+            K = np.dot(Pxz,np.linalg.pinv(Px_hat))
+        z_ukf = z_hat + np.dot(K,x_t-x_hat)
+        P_ukf = P_hat - np.dot(K,Px_hat).dot(np.transpose(K))
+        
+        x_particles_ukf = multivariate_normal(mean = x_hat, cov = Px_hat, size = n_particles, check_valid='ignore')
+        z_particles_ukf = multivariate_normal(mean = z_ukf, cov = P_ukf, size = n_particles, check_valid='ignore')
+        
+        self.weights = np.clip(
+                self.weights * np.array(
+                    self.squared_error(x_particles_ukf.reshape(n_particles, -1),x_t.reshape(1, -1), sigma=100)),0,np.inf,)
+        
+        weight_normalisation = np.sum(self.weights)
+        self.weights = self.weights / weight_normalisation
+        n_eff = (1.0 / np.sum(self.weights ** 2)) / (n_particles)
+        self.weight_entropy = np.sum(self.weights * np.log(self.weights))
+        # preserve current sample set before any replenishment
+        self.original_particles = np.array(self.transformed_particles_noisy)
+        
+# =============================================================================
+#         self.mean_hypothesis = np.sum(self.x_particles_ukf.T * self.weights, axis=-1).T
+#         self.cov_hypothesis = np.cov(self.x_particles_ukf, rowvar=False, aweights=self.weights)
+#         self.mean_state = np.sum(self.x_particles_ukf.T * self.weights, axis=-1).T
+#         self.cov_state = np.cov(self.x_particles_ukf, rowvar=False, aweights=self.weights)
+# =============================================================================
+        self.mean_hypothesis = np.sum(x_particles_ukf.T * self.weights, axis=-1).T
+        self.cov_hypothesis = np.cov(x_particles_ukf, rowvar=False, aweights=self.weights)
+        self.mean_state = np.sum(x_particles_ukf.T * self.weights, axis=-1).T
+        self.cov_state = np.cov(x_particles_ukf, rowvar=False, aweights=self.weights)
+        
+        if n_eff < n_eff_threshold:
+            
+            if resample_method == "resample":
+                indices = self.resample(self.weights)
+                
+            if resample_method == "systematic":
+                indices = self.systematic_resample(self.weights)
+                
+            if resample_method == "residual":
+                indices = self.residual_resample(self.weights)
+                
+            if resample_method == "stratified":
+                indices = self.stratified_resample(self.weights)
+                
+            # particles = self.transformed_particles_noisy[indices, :]
+            z_particles_ukf = z_particles_ukf[indices, :]
+            self.weights = np.ones(n_particles) / (n_particles)
+
+    # randomly resample some particles from the prior
+        if resample_proportion > 0:
+            random_mask = (
+                np.random.random(size=(n_particles,)) < resample_proportion)
+            z_particles_ukf[random_mask, :] = multivariate_normal(mean=self.z_ukf, cov=self.P_ukf, size=n_particles)[random_mask, :]
+        
+        z_particles_ukf = particles    
+        
+        return self.mean_hypothesis, self.cov_hypothesis, particles
        
     @override
     def predict(self,x,u):
