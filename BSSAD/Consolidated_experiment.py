@@ -18,13 +18,13 @@ logging.getLogger('tensorflow').setLevel(logging.ERROR)
 '''
     Dataset : WADI, SWAT, PUMP, HTTP, ASD
 '''
-dataset = "PUMP"
+dataset = "WADI"
 
 
 '''
     filterType : PF, EnKF, UKF-PF
 '''
-filterType = "EnKF"
+filterType = "PF"
 
 '''
     resample_method : systematic
@@ -35,7 +35,7 @@ resample_method = "systematic"
     n_particles (PF) : 500, 1000, 2000
     n_particles (EnKF) : 10, 20, 50
 '''
-n_particles = 20
+n_particles = 1000
 
 
 '''
@@ -174,7 +174,7 @@ auc = []
 mcc = []
 bestSeed = 2022
 bestF1 = 0.0
-iterations = 1
+iterations = 50
 
 for k in range(0, iterations):
     newSeed = bestSeed + k
@@ -236,79 +236,7 @@ for k in range(0, iterations):
                + "TP: " + str(t[3]) + "\n" + "TN: " + str(t[4]) + "\n"
                + "FP: " + str(t[5]) + "\n" + "FN: " + str(t[6]) + "\n"
                + "AUC: " + str(t[7]) + "\n" + "MCC: " + str(t[8]) + "\n")
-    
-    print()
-    
-# =============================================================================
-#     z_scores_ukf = kf.score_samples(test_x, test_u, n_particles, "UKF", resample_method, reset_hidden_states=True)
-#     
-#     z_scores_ukf = np.nan_to_num(z_scores_ukf)
-#     t, th = bf_search(z_scores_ukf, labels[1:],start=0,end=np.percentile(z_scores_ukf,99.9),step_num=10000,display_freq=50,verbose=False)
-#     print('NSIBF')
-#     print('best-f1', t[0])
-#     print('precision', t[1])
-#     print('recall', t[2])
-#     print('accuracy',(t[3]+t[4])/(t[3]+t[4]+t[5]+t[6]))
-#     print('TP', t[3])
-#     print('TN', t[4])
-#     print('FP', t[5])
-#     print('FN', t[6])
-#     print("AUC", t[7])
-#     print("MCC", t[8])
-#     print()
-#     
-#     file.write("NSIBF" + "\n" + "Best-F1: " + str(t[0]) + "\n"
-#                + "Precision: " + str(t[1]) + "\n" + "Recall: " + str(t[2]) + "\n"
-#                + "Accuracy: " + str((t[3]+t[4])/(t[3]+t[4]+t[5]+t[6])) + "\n"
-#                + "TP: " + str(t[3]) + "\n" + "TN: " + str(t[4]) + "\n"
-#                + "FP: " + str(t[5]) + "\n" + "FN: " + str(t[6]) + "\n"
-#                + "AUC: " + str(t[7]) + "\n" + "MCC: " + str(t[8]) + "\n")
-# =============================================================================
-
-    recon_scores,pred_scores = kf.score_samples_via_residual_error(test_x,test_u)
-
-    t, th = bf_search(recon_scores[1:], labels[1:],start=0,end=np.percentile(recon_scores,99.9),step_num=10000,display_freq=50,verbose=False)
-    print('NSIBF-RECON')
-    print('best-f1', t[0])
-    print('precision', t[1])
-    print('recall', t[2])
-    print('accuracy',(t[3]+t[4])/(t[3]+t[4]+t[5]+t[6]))
-    print('TP', t[3])
-    print('TN', t[4])
-    print('FP', t[5])
-    print('FN', t[6])
-    print("AUC", t[7])
-    print("MCC", t[8])
-    print()
-    file.write("NSIBF_RECON" + "\n" + "Best-F1: " + str(t[0]) + "\n"
-               + "Precision: " + str(t[1]) + "\n" + "Recall: " + str(t[2]) + "\n"
-               + "Accuracy: " + str((t[3]+t[4])/(t[3]+t[4]+t[5]+t[6])) + "\n"
-               + "TP: " + str(t[3]) + "\n" + "TN: " + str(t[4]) + "\n"
-               + "FP: " + str(t[5]) + "\n" + "FN: " + str(t[6]) + "\n"
-               + "AUC: " + str(t[7]) + "\n" + "MCC: " + str(t[8]) + "\n")
-    
-    t, th = bf_search(pred_scores, labels[1:],start=0,end=np.percentile(pred_scores,99.9),step_num=10000,display_freq=50,verbose=False)
-    print('NSIBF-PRED')
-    print('best-f1', t[0])
-    print('precision', t[1])
-    print('recall', t[2])
-    print('accuracy',(t[3]+t[4])/(t[3]+t[4]+t[5]+t[6]))
-    print('TP', t[3])
-    print('TN', t[4])
-    print('FP', t[5])
-    print('FN', t[6])
-    print("AUC", t[7])
-    print("MCC", t[8])
-    file.write("NSIBF_PRED" + "\n" + "Best-F1: " + str(t[0]) + "\n"
-               + "Precision: " + str(t[1]) + "\n" + "Recall: " + str(t[2]) + "\n"
-               + "Accuracy: " + str((t[3]+t[4])/(t[3]+t[4]+t[5]+t[6])) + "\n"
-               + "TP: " + str(t[3]) + "\n" + "TN: " + str(t[4]) + "\n"
-               + "FP: " + str(t[5]) + "\n" + "FN: " + str(t[6]) + "\n"
-               + "AUC: " + str(t[7]) + "\n" + "MCC: " + str(t[8]) + "\n")
-    
     file.close()
-    
-
 
 npyf1 = np.array(f1)
 npyAuc = np.array(auc)
