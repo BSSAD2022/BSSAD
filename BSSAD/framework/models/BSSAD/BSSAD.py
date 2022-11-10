@@ -1,4 +1,5 @@
 import numpy as np
+from tqdm import tqdm
 import random
 from ...preprocessing import ContinousSignal,DiscreteSignal
 from filterpy.kalman import unscented_transform, JulierSigmaPoints
@@ -190,8 +191,9 @@ class BSSAD(BaseModel,DataExtractor):
         particles = multivariate_normal(mean = self.z_pf, cov = self.P_pf, size = n_particles)
         
         anomaly_scores = []
-        for t in range(1,len(x)):
-            print(t,'/',len(x))
+        #for t in range(1,len(x)):
+            #print(t,'/',len(x))
+        for t in tqdm(range(1, len(x))):
             u_t = u[t-1,:,:]
             x_t = x[t,:]
             
